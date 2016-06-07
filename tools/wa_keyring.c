@@ -29,10 +29,14 @@ Usage: %s [-hv] -f <keyring> list\n\
        %s -f <keyring> add <valid-after>\n\
        %s -f <keyring> gc <oldest-valid-after-to-keep>\n\
        %s -f <keyring> remove <id>\n\
+       %s -f <keyring> export <id> <outkeyring>\n\
+       %s -f <keyring> import <srckeyring>\n\
 \n\
 Functions:\n\
   add <valid-after>                 # add a new random key\n\
+  export <id> <outkeyring>          # export key by id to outkeyring\n\
   gc <oldest-valid-after-to-keep>   # garbage collect old keys\n\
+  import <srckeyring>               # import keys in srckeyring\n\
   list                              # list keys\n\
   remove <id>                       # remove key by id\n\
 \n\
@@ -73,7 +77,7 @@ usage(int status)
 {
     fprintf((status == 0) ? stdout : stderr, usage_message,
             message_program_name, message_program_name, message_program_name,
-            message_program_name);
+            message_program_name, message_program_name, message_program_name);
     exit(status);
 }
 
@@ -273,6 +277,59 @@ list_keyring(struct webauth_context *ctx, const char *keyring, bool verbose)
     }
 }
 
+/*
+ * Export the key at the given slot such that it can be imported into a
+ * keyring on a different server. Thus allowing keys to be synchronized
+ * across servers that have divergent key histories.
+ */
+static void
+export_key(struct webauth_context *ctx, const char *keyring, unsigned long n, const char *outkeyring)
+{
+    struct webauth_keyring *ring;
+    struct webauth_keyring *newring;
+    struct webauth_keyring_entry *entry;
+    int s;
+
+    s = webauth_keyring_read(ctx, keyring, &ring);
+    if (s != WA_ERR_NONE)
+        die_webauth(ctx, s, "cannot read keyring %s", keyring);
+
+    entry = &APR_ARRAY_IDX(ring->entries, n, struct webauth_keyring_entry);
+    newring = webauth_keyring_new(ctx, 1);
+    webauth_keyring_add(ctx, newring, entry->creation, entry->valid_after, entry->key);
+    s = webauth_keyring_write(ctx, newring, outkeyring);
+    if (s != WA_ERR_NONE)
+        die_webauth(ctx, s, "cannot write new keyring %s", outkeyring);
+}
+
+/*
+ * Import one keyring into another keyring. This allows keys from another
+ * server to be synchronized with servers that have a divergent key history.
+ */
+static void
+import_key(struct webauth_context *ctx, const char *keyring, const char *impkeyring) {
+    struct webauth_keyring *ring;
+    struct webauth_keyring *impring;
+    struct webauth_keyring_entry *impentry;
+    int s;
+    size_t i;
+
+    s = webauth_keyring_read(ctx, keyring, &ring);
+    if (s != WA_ERR_NONE)
+        die_webauth(ctx, s, "cannot read keyring %s", keyring);
+
+    s = webauth_keyring_read(ctx, impkeyring, &impring);
+    if (s != WA_ERR_NONE)
+        die_webauth(ctx, s, "cannot read keyring %s", impkeyring);
+
+    for (i = 0; i < (size_t) impring->entries->nelts; i++) {
+        impentry = &APR_ARRAY_IDX(impring->entries, i, struct webauth_keyring_entry);
+        webauth_keyring_add(ctx, ring, impentry->creation, impentry->valid_after, impentry->key);
+    }
+    s = webauth_keyring_write(ctx, ring, keyring);
+    if (s != WA_ERR_NONE)
+        die_webauth(ctx, s, "cannot write new keyring %s", keyring);
+}
 
 /*
  * Add a new key to a keyring.  Takes the path to the keyring and the offset
@@ -403,7 +460,7 @@ main(int argc, char **argv)
     }
     argc -= optind;
     argv += optind;
-    if (keyring == NULL || argc > 2)
+    if (keyring == NULL || argc > 3)
         usage(1);
     if (argc > 0) {
         command = argv[0];
@@ -418,6 +475,19 @@ main(int argc, char **argv)
         if (argc > 0)
             usage(1);
         list_keyring(ctx, keyring, verbose);
+    } else if (strcmp(command, "export") == 0) {
+        if (argc != 2)
+            usage(1);
+        errno = 0;
+        id = strtoul(argv[0], &end, 10);
+        if (errno != 0 || *end != '\0')
+            die("invalid key id: %s", argv[0]);
+        export_key(ctx, keyring, id, argv[1]);
+    } else if (strcmp(command, "import") == 0) {
+        if (argc != 1)
+            usage(1);
+        errno = 0;
+        import_key(ctx, keyring, argv[0]);
     } else if (strcmp(command, "add") == 0) {
         if (argc != 1)
             usage(1);
